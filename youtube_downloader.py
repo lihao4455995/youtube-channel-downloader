@@ -41,46 +41,75 @@ class YouTubeDownloader:
             视频信息列表
         """
         try:
-            # 使用yt-dlp获取频道信息
-            cmd = [
+            # 首先尝试轻量级flat模式快速获取视频列表
+            print("正在快速获取视频列表...")
+            cmd_flat = [
                 'yt-dlp',
                 '--flat-playlist',
                 '--print-json',
                 '--skip-download',
+                '--playlist-end', '10',
+                '--socket-timeout', '8',
                 channel_url
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+            # 设置较短超时时间
+            result_flat = subprocess.run(cmd_flat, capture_output=True, text=True, encoding='utf-8', timeout=10)
             
-            if result.returncode != 0:
-                raise RuntimeError(f"获取频道信息失败: {result.stderr}")
+            if result_flat.returncode != 0:
+                raise RuntimeError(f"获取频道信息失败: {result_flat.stderr}")
                 
-            videos = []
-            lines = result.stdout.strip().split('\n')
+            videos_flat = []
+            lines_flat = result_flat.stdout.strip().split('\n')
             
-            for line in lines:
+            for line in lines_flat:
                 if line.strip():
                     try:
                         video_info = json.loads(line)
                         
-                        # 提取视频信息
+                        # flat模式下基础信息
                         video_data = {
                             'id': video_info.get('id', ''),
                             'title': video_info.get('title', 'Unknown Title'),
                             'url': f"https://www.youtube.com/watch?v={video_info.get('id', '')}",
-                            'duration': self._format_duration(video_info.get('duration', 0)),
-                            'upload_date': self._format_upload_date(video_info.get('upload_date', '')),
+                            'duration': 'Unknown',
+                            'upload_date': 'Unknown',
                             'view_count': video_info.get('view_count', 0),
                             'channel': video_info.get('channel', 'Unknown Channel')
                         }
                         
-                        videos.append(video_data)
+                        videos_flat.append(video_data)
                         
                     except json.JSONDecodeError:
                         continue
-                        
-            return videos
             
+            print(f"flat模式获取到 {len(videos_flat)} 个视频")
+            
+            # 尝试逐个增强前几个视频的信息
+            if videos_flat:
+                print("正在获取前几个视频的详细信息...")
+                enhanced_count = 0
+                for i, video in enumerate(videos_flat[:3]):  # 只增强前3个视频
+                    try:
+                        print(f"获取第 {i+1} 个视频信息...")
+                        video_info = self.get_video_info(video['url'])
+                        
+                        # 使用获取到的详细信息更新视频数据
+                        video['duration'] = self._format_duration(video_info.get('duration', 0))
+                        video['upload_date'] = self._format_upload_date(video_info.get('upload_date', ''))
+                        video['view_count'] = video_info.get('view_count', video['view_count'])
+                        enhanced_count += 1
+                        
+                    except Exception as e:
+                        print(f"获取第 {i+1} 个视频信息失败: {e}")
+                        continue
+                
+                print(f"成功增强 {enhanced_count} 个视频的详细信息")
+            
+            return videos_flat
+            
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("获取视频列表超时，请检查网络连接或稍后重试")
         except Exception as e:
             raise RuntimeError(f"获取频道视频失败: {str(e)}")
             
@@ -218,14 +247,19 @@ class YouTubeDownloader:
         Returns:
             频道ID
         """
-        # 首先移除路径中的/shorts、/videos等后缀
-        base_url = re.sub(r'/shorts$|/videos$|/featured$', '', channel_url)
+        # URL解码，处理中文等特殊字符
+        import urllib.parse
+        decoded_url = urllib.parse.unquote(channel_url)
         
+        # 首先移除路径中的/shorts、/videos等后缀
+        base_url = re.sub(r'/shorts$|/videos$|/featured$', '', decoded_url)
+        
+        # 更新正则表达式，支持Unicode字符（包括中文）
         patterns = [
-            r'youtube\.com/channel/([\w-]+)',
-            r'youtube\.com/c/([\w-]+)',
-            r'youtube\.com/@([\w-]+)',
-            r'youtube\.com/user/([\w-]+)'
+            r'youtube\.com/channel/([\w\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\-]+)',  # 支持中文、日文等
+            r'youtube\.com/c/([\w\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\-]+)',    # 支持中文、日文等
+            r'youtube\.com/@([\w\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\-]+)',     # 支持中文、日文等
+            r'youtube\.com/user/([\w\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\-]+)'  # 支持中文、日文等
         ]
         
         for pattern in patterns:
